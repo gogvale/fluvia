@@ -5,10 +5,14 @@
 #   export PORKBUN_API_KEY=... PORKBUN_SECRET_API_KEY=...
 #   # or put them in ~/.hermes/creds/porkbun.txt as KEY=... / SECRET=...
 #
-#   bash dns-porkbun.sh ping                 # credentials valid?
-#   bash dns-porkbun.sh list <domain>        # current records
-#   bash dns-porkbun.sh set  <domain> <ip>   # point @ and www at <ip> (create or edit)
-#   bash dns-porkbun.sh check <domain> <ip>  # resolve + compare + CT-log presence
+#   bash dns-porkbun.sh ping                        # credentials valid?
+#   bash dns-porkbun.sh list <host>                 # records of its zone
+#   bash dns-porkbun.sh set  <host> <ip> [--www]    # point <host> (and www) at <ip>
+#   bash dns-porkbun.sh del  <host> [--www]         # remove those A records
+#   bash dns-porkbun.sh check <host> <ip>           # resolve + https + CT-log presence
+#
+# <host> may be an apex (cottonsky.shop) or a subdomain (test.cottonsky.shop): the zone is
+# resolved against the account's domain list, so `set`/`del` work for both.
 set -euo pipefail
 
 API="https://api.porkbun.com/api/json/v3"
@@ -20,6 +24,7 @@ load_creds() {
     # shellcheck disable=SC1090
     . "$f"
   fi
+  export PORKBUN_API_KEY PORKBUN_SECRET_API_KEY
 }
 
 call() { # call <path> <json-extra>
@@ -28,58 +33,103 @@ call() { # call <path> <json-extra>
     --max-time 25 "$API/$1"
 }
 
+# split <host> into "<zone> <prefix>" using the account's domain list
+resolve_zone() {
+  local host="$1"
+  call domain/listAll "" | python3 -c "
+import json,sys
+host = sys.argv[1].lower().rstrip('.')
+try:
+    domains = [d['domain'].lower() for d in json.load(sys.stdin).get('domains', [])]
+except Exception:
+    print('ERROR: cannot list domains'); raise SystemExit(1)
+matches = [d for d in domains if host == d or host.endswith('.' + d)]
+if not matches:
+    print(f'ERROR: {host} is not under any domain in this account'); raise SystemExit(1)
+zone = max(matches, key=len)
+prefix = host[:-len(zone)].rstrip('.')
+print(zone, prefix)" "$host"
+}
+
 cmd_ping() { load_creds; call ping ""; echo; }
 
 cmd_list() {
-  load_creds; local d="$1"
-  call "dns/retrieve/$d" "" | python3 -c "
+  load_creds; local host="$1"; read -r zone prefix < <(resolve_zone "$host")
+  echo "zone=$zone prefix=${prefix:-<apex>}"
+  call "dns/retrieve/$zone" "" | python3 -c "
 import json,sys
 r=json.load(sys.stdin)
 if r.get('status')!='SUCCESS': print('ERROR:', r); raise SystemExit(1)
 for rec in r.get('records',[]):
-    if rec['type'] in ('A','AAAA','CNAME'):
-        print(f\"  {rec['type']:5} {rec['name']:35} -> {rec['content']}  (ttl {rec['ttl']}, id {rec['id']})\")"
+    if rec['type'] in ('A','AAAA','CNAME','TXT'):
+        print(f\"  {rec['type']:5} {rec['name']:38} -> {rec['content'][:60]}  (ttl {rec['ttl']}, id {rec['id']})\")"
 }
 
-# upsert an A record: edit if an A record with that name exists, else create
+# upsert one A record: edit if it exists, else create. name '' = apex.
 upsert_a() {
-  local d="$1" name="$2" ip="$3"
-  local existing
-  existing=$(call "dns/retrieve/$d" "" | python3 -c "
+  local zone="$1" name="$2" ip="$3" id=""
+  id=$(call "dns/retrieve/$zone" "" | python3 -c "
 import json,sys
+want=sys.argv[1].strip('.').lower()
 r=json.load(sys.stdin)
-want=sys.argv[1]
 for rec in r.get('records',[]):
-    if rec['type']=='A' and rec['name'].rstrip('.')==want:
-        print(rec['id']); break" "$name")
-  if [ -n "$existing" ]; then
-    call "dns/edit/$d/$existing" ", \"name\":\"$name\", \"type\":\"A\", \"content\":\"$ip\", \"ttl\":\"600\"" \
-      | python3 -c "import json,sys; r=json.load(sys.stdin); print(f'  edited  {sys.argv[2]:35} -> {sys.argv[3]}  [{r.get(\"status\")}]')" - "$name" "$ip"
+    n=rec['name'].rstrip('.').lower()
+    apex_ok = (want=='' and n==sys.argv[2].lower())
+    if rec['type']=='A' and (n==want or apex_ok):
+        print(rec['id']); break" "$name" "$zone")
+  local label="${name:-<apex>}"
+  if [ -n "$id" ]; then
+    call "dns/edit/$zone/$id" ", \"name\":\"$name\", \"type\":\"A\", \"content\":\"$ip\", \"ttl\":\"600\"" \
+      | python3 -c "import json,sys;r=json.load(sys.stdin);print(f\"  edit   {sys.argv[1]:38} -> {sys.argv[2]}  [{r.get('status')}] {r.get('message','')}\")" "$label" "$ip"
   else
-    call "dns/create/$d" ", \"name\":\"$name\", \"type\":\"A\", \"content\":\"$ip\", \"ttl\":\"600\"" \
-      | python3 -c "import json,sys; r=json.load(sys.stdin); print(f'  created {sys.argv[2]:35} -> {sys.argv[3]}  [{r.get(\"status\")}]')" - "$name" "$ip"
+    call "dns/create/$zone" ", \"name\":\"$name\", \"type\":\"A\", \"content\":\"$ip\", \"ttl\":\"600\"" \
+      | python3 -c "import json,sys;r=json.load(sys.stdin);print(f\"  create {sys.argv[1]:38} -> {sys.argv[2]}  [{r.get('status')}] {r.get('message','')}\")" "$label" "$ip"
   fi
 }
 
 cmd_set() {
-  load_creds; local d="$1" ip="$2"
-  echo "pointing $d at $ip"
-  upsert_a "$d" "" "$ip"
-  upsert_a "$d" "www" "$ip"
+  load_creds; local host="$1" ip="$2" with_www="${3:-}"
+  read -r zone prefix < <(resolve_zone "$host")
+  echo "zone=$zone prefix=${prefix:-<apex>} -> $ip"
+  upsert_a "$zone" "$prefix" "$ip"
+  [ "$with_www" = "--www" ] && upsert_a "$zone" "${prefix:+$prefix.}www" "$ip"
+  return 0
+}
+
+cmd_del() {
+  load_creds; local host="$1" with_www="${2:-}"
+  read -r zone prefix < <(resolve_zone "$host")
+  local targets="$host"
+  [ "$with_www" = "--www" ] && targets="$host ${prefix:+$prefix.}www.$zone"
+  for want in $targets; do
+    call "dns/retrieve/$zone" "" | python3 -c "
+import json,sys,subprocess,os
+want=sys.argv[1].rstrip('.').lower()
+r=json.load(sys.stdin)
+ids=[rec['id'] for rec in r.get('records',[]) if rec['name'].rstrip('.').lower()==want]
+if not ids: print(f'  no A/other record for {want}'); raise SystemExit
+for i in ids:
+    out=subprocess.run(['curl','-s','-X','POST','-H','Content-Type: application/json','-d',
+        json.dumps({'apikey':os.environ['PORKBUN_API_KEY'],'secretapikey':os.environ['PORKBUN_SECRET_API_KEY']}),
+        f\"https://api.porkbun.com/api/json/v3/dns/delete/{sys.argv[2]}/{i}\"],capture_output=True,text=True).stdout
+    print(f\"  delete {want:38} id={i}  [{json.loads(out).get('status')}] (all types)\")" "$want" "$zone"
+  done
+  return 0
 }
 
 cmd_check() {
-  local d="$1" want="$2"
+  local host="$1" want="$2"
   echo "== resolution =="
-  for h in "$d" "www.$d"; do
+  for h in "$host" "www.$host"; do
     got=$(dig +short "$h" @1.1.1.1 | tail -1)
-    if [ "$got" = "$want" ]; then echo "  OK    $h -> $got"; else echo "  FAIL  $h -> ${got:-<none>} (expected $want)"; fi
+    if [ "$got" = "$want" ]; then echo "  OK    $h -> $got"; else echo "  note  $h -> ${got:-<none>}"; fi
   done
   echo "== https =="
-  code=$(curl -sk -o /dev/null -w "%{http_code}" "https://$d/" --max-time 15 || true)
-  echo "  https://$d -> $code"
+  code=$(curl -sk -o /dev/null -w "%{http_code}" "https://$host/" --max-time 15 || true)
+  echo "  https://$host -> $code"
+  echo "  cert:"; echo | timeout 12 openssl s_client -connect "$host:443" -servername "$host" 2>/dev/null | openssl x509 -noout -subject -issuer -dates 2>/dev/null | sed 's/^/    /'
   echo "== certificate transparency (discovery channel) =="
-  curl -s --max-time 20 "https://crt.sh/?q=$d&output=json" | python3 -c "
+  curl -s --max-time 20 "https://crt.sh/?q=$host&output=json" | python3 -c "
 import json,sys
 try: rows=json.load(sys.stdin)
 except Exception: print('  (crt.sh unavailable)'); raise SystemExit
@@ -91,8 +141,9 @@ else:
 
 case "${1:-}" in
   ping)  cmd_ping ;;
-  list)  cmd_list "${2:?domain}" ;;
-  set)   cmd_set "${2:?domain}" "${3:?ip}" ;;
-  check) cmd_check "${2:?domain}" "${3:?ip}" ;;
-  *) echo "usage: $0 {ping | list <domain> | set <domain> <ip> | check <domain> <ip>}" >&2; exit 2 ;;
+  list)  cmd_list "${2:?host}" ;;
+  set)   cmd_set "${2:?host}" "${3:?ip}" "${4:-}" ;;
+  del)   cmd_del "${2:?host}" "${3:-}" ;;
+  check) cmd_check "${2:?host}" "${3:?ip}" ;;
+  *) echo "usage: $0 {ping | list <host> | set <host> <ip> [--www] | del <host> [--www] | check <host> <ip>}" >&2; exit 2 ;;
 esac
