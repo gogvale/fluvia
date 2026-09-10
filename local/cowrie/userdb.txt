@@ -1,0 +1,4 @@
+# Cowrie userdb - entropic-password FILTER (accept-all OFF, ASCII only - parser reads ascii)
+# Only these two credentials succeed; every other attempt logs as login.failed (control arm).
+admin:x:Monero@2021
+operator:x:Monero@2021

@@ -1,0 +1,11 @@
+# C2 / payload endpoints to sinkhole (one per line).
+#   ip          -> every tcp port
+#   ip:port     -> that port only
+# Connections here are answered by the fake-c2 responder instead of leaving the box;
+# nothing is dropped silently, so the caller keeps talking and we log the full exchange.
+# Seeded with Run-1 observations (Cotton Sky decoy, Sept 2026).
+217.60.195.113:80
+217.60.195.113:443
+62.210.131.144:2535
+163.53.90.10:443
+163.53.90.11:443

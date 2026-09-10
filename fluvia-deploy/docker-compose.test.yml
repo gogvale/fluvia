@@ -1,0 +1,45 @@
+services:
+  # TEST variant — web/cowrie stay internal (no host ports). fake-c2 + suricata are
+  # host-networked either way, so the sinkhole + JA3 paths are identical to production.
+  fluvi-web:
+    build: ./fluvi-app
+    container_name: fluvi-web
+    environment:
+      - EVIDENCE_DIR=/evidence
+    volumes:
+      - ./evidence:/evidence
+    restart: unless-stopped
+  cowrie:
+    image: cowrie/cowrie:latest
+    container_name: fluvi-cowrie
+    environment:
+      - COWRIE_HONEYPOT_AUTH_CLASS=UserDB
+      - COWRIE_HONEYPOT_HOSTNAME=fluvia-prod
+    volumes:
+      - ./cowrie/userdb.txt:/cowrie/cowrie-git/etc/userdb.txt:ro
+      - ./cowrie/log:/cowrie/cowrie-git/var/log/cowrie
+    restart: unless-stopped
+  fake-c2:
+    build: ./fake-c2
+    container_name: fluvi-fakec2
+    network_mode: host
+    environment:
+      - EVIDENCE_DIR=/evidence
+      - SINK_PORT=${SINK_PORT:-9001}
+      - EXTRA_PORTS=2535,8080,6021
+    volumes:
+      - ./evidence:/evidence
+    restart: unless-stopped
+  suricata:
+    image: ${SURICATA_IMAGE:-jasonish/suricata:latest}
+    container_name: fluvi-ja3
+    network_mode: host
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+      - SYS_NICE
+    volumes:
+      - ./classify/eve:/var/log/suricata
+    # ja3 is off by default in the upstream config — turn it on explicitly.
+    command: ["-i", "${IFACE:-eth0}", "--set", "app-layer.protocols.tls.ja3-fingerprints=yes"]
+    restart: unless-stopped

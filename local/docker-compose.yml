@@ -1,0 +1,26 @@
+services:
+  # Fluvia lure — FICTIONAL crypto on/off-ramp (Flask). Every asset is a señuelo.
+  fluvi-web:
+    build: ./fluvi-app
+    container_name: fluvi-web
+    ports:
+      - "127.0.0.1:8000:8000"
+    environment:
+      - EVIDENCE_DIR=/evidence
+    volumes:
+      - ./evidence:/evidence
+    restart: unless-stopped
+
+  # Cowrie SSH honeypot — entropic-password filter (accept-all OFF, userdb realista).
+  cowrie:
+    image: cowrie/cowrie:latest
+    container_name: fluvi-cowrie
+    ports:
+      - "127.0.0.1:2222:2222"
+    environment:
+      - COWRIE_HONEYPOT_AUTH_CLASS=UserDB
+      - COWRIE_HONEYPOT_HOSTNAME=fluvia-prod
+    volumes:
+      - ./cowrie/userdb.txt:/cowrie/cowrie-git/etc/userdb.txt:ro
+      - ./cowrie/log:/cowrie/cowrie-git/var/log/cowrie
+    restart: unless-stopped

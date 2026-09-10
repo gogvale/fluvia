@@ -1,0 +1,24 @@
+# --- deps / build output ---
+node_modules/
+.next/
+__pycache__/
+*.pyc
+
+# --- local env files (placeholder values only, but keep them out anyway) ---
+.env.local
+.env*.local
+
+# --- capture evidence: never commit what the attackers did ---
+evidence/*
+!evidence/.gitkeep
+**/evidence/*.jsonl
+cowrie/log/
+classify/eve/
+*.pcap
+*.pcap.gz
+
+# --- logs / editor / os cruft ---
+*.log
+.DS_Store
+.idea/
+.vscode/
