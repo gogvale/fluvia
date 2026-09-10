@@ -60,9 +60,12 @@ cmd_list() {
 import json,sys
 r=json.load(sys.stdin)
 if r.get('status')!='SUCCESS': print('ERROR:', r); raise SystemExit(1)
-for rec in r.get('records',[]):
-    if rec['type'] in ('A','AAAA','CNAME','TXT'):
-        print(f\"  {rec['type']:5} {rec['name']:38} -> {rec['content'][:60]}  (ttl {rec['ttl']}, id {rec['id']})\")"
+recs=r.get('records',[])
+if not recs: print('  (zona vacia)')
+for rec in recs:
+    # NB: show EVERY type — Porkbun seeds apex ALIAS + wildcard CNAME 'parking'
+    # records on new domains, and an apex ALIAS blocks creating the apex A.
+    print(f\"  {rec['type']:6} {rec['name']:38} -> {rec['content'][:60]}  (ttl {rec['ttl']}, id {rec['id']})\")"
 }
 
 # upsert one A record: edit if it exists, else create. name '' = apex.
@@ -91,6 +94,23 @@ cmd_set() {
   load_creds; local host="$1" ip="$2" with_www="${3:-}"
   read -r zone prefix < <(resolve_zone "$host")
   echo "zone=$zone prefix=${prefix:-<apex>} -> $ip"
+  # a fresh Porkbun domain ships an apex ALIAS + wildcard CNAME pointing at the parking
+  # host; an apex ALIAS makes the apex A create fail with 'conflict'. Clear ONLY the
+  # parking ALIAS/CNAME at the exact names we are about to set — NEVER NS/other types
+  # (deleting the apex NS RRset breaks the whole zone).
+  for name in "$prefix" "${prefix:+$prefix.}www"; do
+    call "dns/retrieve/$zone" "" | python3 -c "
+import json,sys,os,subprocess
+zone=sys.argv[2]; prefix=sys.argv[1]
+want=(prefix+'.'+zone).rstrip('.').lower() if prefix else zone.lower()
+r=json.load(sys.stdin)
+for rec in r.get('records',[]):
+    if rec['name'].rstrip('.').lower()==want and rec['type'] in ('ALIAS','CNAME'):
+        out=subprocess.run(['curl','-s','-X','POST','-H','Content-Type: application/json','-d',
+            json.dumps({'apikey':os.environ['PORKBUN_API_KEY'],'secretapikey':os.environ['PORKBUN_SECRET_API_KEY']}),
+            f\"https://api.porkbun.com/api/json/v3/dns/delete/{zone}/{rec['id']}\"],capture_output=True,text=True).stdout
+        print(f\"  cleared {rec['type']} {rec['name']} (parking) [{json.loads(out).get('status')}]\")" "$prefix" "$zone"
+  done
   upsert_a "$zone" "$prefix" "$ip"
   [ "$with_www" = "--www" ] && upsert_a "$zone" "${prefix:+$prefix.}www" "$ip"
   return 0
@@ -106,13 +126,14 @@ cmd_del() {
 import json,sys,subprocess,os
 want=sys.argv[1].rstrip('.').lower()
 r=json.load(sys.stdin)
-ids=[rec['id'] for rec in r.get('records',[]) if rec['name'].rstrip('.').lower()==want]
-if not ids: print(f'  no A/other record for {want}'); raise SystemExit
+# NEVER delete NS: wiping the apex NS RRset breaks the zone. SOA is not a record here.
+ids=[rec['id'] for rec in r.get('records',[]) if rec['name'].rstrip('.').lower()==want and rec['type']!='NS']
+if not ids: print(f'  no deletable record for {want}'); raise SystemExit
 for i in ids:
     out=subprocess.run(['curl','-s','-X','POST','-H','Content-Type: application/json','-d',
         json.dumps({'apikey':os.environ['PORKBUN_API_KEY'],'secretapikey':os.environ['PORKBUN_SECRET_API_KEY']}),
         f\"https://api.porkbun.com/api/json/v3/dns/delete/{sys.argv[2]}/{i}\"],capture_output=True,text=True).stdout
-    print(f\"  delete {want:38} id={i}  [{json.loads(out).get('status')}] (all types)\")" "$want" "$zone"
+    print(f\"  delete {want:38} id={i}  [{json.loads(out).get('status')}] (all types except NS)\")" "$want" "$zone"
   done
   return 0
 }
