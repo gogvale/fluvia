@@ -1,0 +1,23 @@
+{
+	email __ACME_EMAIL__
+__ACME_CA_LINE__
+}
+
+# Public front. Terminates TLS (Let's Encrypt) and publishes the CT-log discovery
+# channel, then proxies to the lure. The Host header and X-Forwarded-For are what the
+# app uses to attribute a real client IP.
+__DOMAIN__ {
+	encode gzip
+
+	log {
+		output file /var/log/caddy/access.log
+		format json
+	}
+
+	# keep bots out of the ACME path but log nothing else away — this is a lure
+	reverse_proxy fluvi-web:8000
+}
+
+www.__DOMAIN__ {
+	redir https://__DOMAIN__{uri}
+}

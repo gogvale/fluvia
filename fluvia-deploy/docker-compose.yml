@@ -1,10 +1,29 @@
 services:
-  # Fluvia lure web (FICTIONAL on/off-ramp). Public on :80 (TLS via Caddy/LE afterwards).
+  # Public front: TLS via Let's Encrypt (real cert = CT-log discovery channel),
+  # then reverse-proxy to the lure. This is the only service exposed on 80/443.
+  caddy:
+    image: caddy:2-alpine
+    container_name: fluvi-caddy
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      - DOMAIN=${DOMAIN:?set DOMAIN in .env}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./caddy/data:/data
+      - ./caddy/log:/var/log/caddy
+    depends_on:
+      - fluvi-web
+    restart: unless-stopped
+
+  # Fluvia lure web (FICTIONAL on/off-ramp) — internal only, reachable via Caddy.
   fluvi-web:
     build: ./fluvi-app
     container_name: fluvi-web
-    ports:
-      - "80:8000"
+    expose:
+      - "8000"
     environment:
       - EVIDENCE_DIR=/evidence
     volumes:
