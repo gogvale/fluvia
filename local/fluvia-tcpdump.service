@@ -1,0 +1,21 @@
+[Unit]
+Description=Fluvia honeypot packet capture (tcpdump)
+Documentation=file:///root/fluvia-deploy/local/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# -Z root : Ubuntu's tcpdump drops privileges to user 'tcpdump' and its
+#           AppArmor profile is in ENFORCE mode, which then blocks writes under
+#           /var/log/tcpdump. Staying root is the documented workaround and
+#           avoids having to weaken the profile.
+# -n      : never resolve names (egress is locked, DNS would stall)
+# -C 25 -W 10 : rotate 10 files of 25 MB => cap.pcap0 .. cap.pcap9 (~250 MB max)
+ExecStart=/usr/bin/tcpdump -i eth0 -Z root -n -s 0 -U -C 25 -W 10 -w /var/log/tcpdump/cap.pcap
+Restart=always
+RestartSec=10
+Nice=-5
+
+[Install]
+WantedBy=multi-user.target
