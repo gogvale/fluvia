@@ -1,0 +1,7 @@
+# Keeps this directory in git.
+#
+# fluvi-app/Dockerfile does `COPY --from=builder /app/public ./public`, but public/
+# was never committed, so a fresh clone could not build:
+#   Error: building at STEP "COPY --from=builder /app/public ./public":
+#   copier: stat: "/app/public": no such file or directory
+# Next.js treats public/ as optional static assets, so an empty dir is correct.
