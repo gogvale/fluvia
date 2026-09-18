@@ -10,8 +10,10 @@ started or stopped: this script only reads the capture files and asks
 podman/openssl for health. See vault Hermes/Fluvia-Honeypot.md.
 
 Significant = C2 sinkhole hits, SSH credential attempts / commands, AI-agent
-lure touches, crypto-value-surface probes. Commodity web scanning noise is
-deliberately NOT reported (it is still counted, in `counts`).
+lure touches (/llms.txt, /agent-notes, /archive, /api/v1/agent-ack), any AI
+crawler touching the lure (near miss: robots.txt / sitemap.xml), and
+crypto-value-surface probes. Commodity web scanning noise is deliberately NOT
+reported (it is still counted, in `counts`).
 """
 import collections
 import datetime
@@ -22,8 +24,10 @@ import sys
 
 BASE = os.environ.get("FLUVIA_BASE", "/root/fluvia-deploy")
 
-# Our own traffic must never be reported as an attacker.
-OURS_IP = {"161.35.0.4"}
+# Our own traffic must never be reported as an attacker. 161.35.0.4 is the Hermes
+# box; 68.183.29.202 is the lure's own public IP (a curl from the box arrives
+# through Caddy with that forwarded-for).
+OURS_IP = {"161.35.0.4", "68.183.29.202"}
 OURS_PREFIX = ("10.", "127.", "172.16.", "172.17.", "172.18.", "192.168.")
 
 AGENT_PREFIX = ("/llms.txt", "/agent-notes", "/archive", "/api/v1/agent-ack")
@@ -31,6 +35,24 @@ CRYPTO_PREFIX = ("/api/v1/balance", "/api/v1/withdraw", "/webhooks",
                  "/api/v1/export-seed")
 EXPECTED_CONTAINERS = ["fluvi-caddy", "fluvi-web", "fluvi-cowrie",
                        "fluvi-fakec2", "fluvi-ja3"]
+
+# AI crawlers / assistants identifiable by user-agent. These are the *near misses*:
+# an AI client touched the lure (robots.txt, sitemap.xml, a page) without reaching
+# the agent canaries. Added 2026-09-18 after finding ClaudeBot fetching
+# /robots.txt + /sitemap.xml sixty-four times (the sitemap 404'd, so the crawl
+# stopped there and /llms.txt was never reached). Search-engine crawlers
+# (Applebot, PetalBot, Googlebot) and dataset scrapers (Diffbot, TimpiBot) are
+# deliberately NOT listed — they are commodity traffic, not AI interactions.
+AI_CRAWLER_UA = ("gptbot", "oai-searchbot", "chatgpt-user", "claudebot", "claude-web",
+                 "claude-user", "anthropic", "perplexity", "ccbot", "bytespider",
+                 "google-extended", "meta-externalagent", "youbot", "mistralai",
+                 "cohere", "duckassistbot", "llmstxt", "llms.txt",
+                 "ai-agent", "aiagent", "agentic")
+
+
+def is_ai_crawler(ua):
+    ua = (ua or "").lower()
+    return any(tag in ua for tag in AI_CRAWLER_UA)
 
 
 def ours(ip):
@@ -105,7 +127,7 @@ def main():
 
     c2 = [r for r in fakec2 if fresh(r) and not ours(r.get("src_ip"))]
 
-    agent, crypto = [], []
+    agent, crypto, crawlers = [], [], []
     for r in capture:
         if ours(r.get("ip")) or not fresh(r):
             continue
@@ -114,6 +136,8 @@ def main():
             agent.append(r)
         elif path.startswith(CRYPTO_PREFIX):
             crypto.append(r)
+        if is_ai_crawler(r.get("ua")):
+            crawlers.append(r)
 
     logins = [r for r in cowrie
               if fresh(r) and not ours(r.get("src_ip"))
@@ -138,7 +162,7 @@ def main():
 
     attackers = set(r.get("src_ip") for r in c2)
     attackers |= set(r.get("src_ip") for r in w1h)
-    attackers |= set(r.get("ip") for r in agent + crypto + logins + new_cred)
+    attackers |= set(r.get("ip") for r in agent + crypto + crawlers + logins + new_cred)
     attackers.discard(None)
 
     print(json.dumps({
@@ -160,6 +184,9 @@ def main():
                          "ua": (r.get("ua") or "")[:70]} for r in agent],
         "crypto_probes": [{"ts": when(r), "ip": r.get("ip"), "path": r.get("path"),
                            "ua": (r.get("ua") or "")[:70]} for r in crypto],
+        "ai_crawlers": [{"ts": when(r), "ip": r.get("ip"), "path": r.get("path"),
+                         "event": r.get("event"), "ua": (r.get("ua") or "")[:130]}
+                        for r in crawlers],
         "scored_creds": new_cred,
         "attackers": sorted(attackers),
         "containers": containers(),
