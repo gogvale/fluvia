@@ -28,6 +28,9 @@ short alert ONLY when a **human or AI/agent actually interacted with the lure**:
             <= 5 attempts in the window        (a poker, not a campaign), OR
             an AI-era username (claude, bot, agent, openai, codex, ...), OR
             a crypto-context username (sol, eth, solv, node, validator, ...)
+        An AI/crypto name only counts for a CAMPAIGN IP (more than 5 attempts) when
+        it is distinctive (a digit or `._-` in it): `bot` and `eth` are wordlist
+        entries, `openai_bot_7` and `eth-node-3` are choices.
 
     COUNTED, NEVER SENT (commodity machine noise):
         dictionary/brute-force campaigns, repeat attempts from known IPs,
@@ -88,7 +91,7 @@ AI_USER_RE = re.compile(r"^(sol|solana|solv|eth|ethereum|eth-?docker|node|nodejs
                         r"validator|raydium|tron|btc|bitcoin|xmr|monero|matic|"
                         r"polkadot|avax|usdc|usdt|stake|staking|wallet|metamask|"
                         r"phantom|binance|coinbase|kraken|crypto|chain|miner)"
-                        r"[0-9._-]*$")
+                        r"(([0-9]+)|([._-][a-z0-9._-]{1,30}))?$")
 
 
 def interesting_user(user):
@@ -100,6 +103,17 @@ def interesting_user(user):
     if AI_USER_RE.match(u):
         return "contexto crypto"
     return ""
+
+
+def distinctive_name(user):
+    """A *campaign* IP (more attempts than a poker) only keeps its AI/crypto-name line
+    if the username carries a digit or a separator — i.e. someone chose it.
+
+    Added 2026-09-23: the bare name `bot` (20 attempts from 203.0.113.69) fired as
+    'nombre de la era IA'. `bot`, `ai`, `gpt`, `chatgpt`, `admin` are wordlist entries;
+    reading them is not evidence of an AI actor. `openai_bot_7` or `claude-codex` is.
+    """
+    return bool(re.search(r"[0-9._-]", (user or "").strip()))
 
 
 def load_state():
@@ -230,6 +244,10 @@ def main():
             why = why or "pocos intentos (no es diccionario)"
         else:
             suppressed["dict_ips"] = suppressed.get("dict_ips", 0) + 1
+            # a wordlist name (`bot`, `ai`, `chatgpt`) is not a signal; a chosen one is
+            if why and not distinctive_name(row.get("user")):
+                suppressed["ai_name_in_wordlist"] = suppressed.get("ai_name_in_wordlist", 0) + 1
+                why = ""
         if why:
             fresh_new.append((row, why, len(per_ip[ip])))
 
