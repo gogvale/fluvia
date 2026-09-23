@@ -11,9 +11,12 @@ podman/openssl for health. See vault Hermes/Fluvia-Honeypot.md.
 
 Significant = C2 sinkhole hits, SSH credential attempts / commands, AI-agent
 lure touches (/llms.txt, /agent-notes, /archive, /api/v1/agent-ack), any AI
-crawler touching the lure (near miss: robots.txt / sitemap.xml), and
-crypto-value-surface probes. Commodity web scanning noise is deliberately NOT
-reported (it is still counted, in `counts`).
+crawler touching the lure (near miss: robots.txt / sitemap.xml), crypto-value
+probes, and behaviourally-scored web sessions (`agentic_sessions`, from
+sessionize.py: how a session moved, not how much). Commodity web scanning noise
+is deliberately NOT reported (it is still counted, in `counts`). Also reports
+`pipeline_mtime`, the freshness of the derived artifacts, so a
+silently-frozen classifier pipeline cannot pass as a quiet lure.
 """
 import collections
 import datetime
@@ -80,6 +83,17 @@ def when(row):
     return row.get("ts") or row.get("timestamp") or ""
 
 
+def mtime(path):
+    """Freshness of a derived artifact — the pipeline was silent-frozen for 8 days
+    (2026-09-15 → 09-23) because nothing scheduled the classifiers, and a stale
+    sessions.jsonl looks exactly like a quiet lure."""
+    try:
+        return datetime.datetime.utcfromtimestamp(os.path.getmtime(path)).strftime(
+            "%Y-%m-%dT%H:%M:%SZ")
+    except Exception:
+        return None
+
+
 def sh(cmd, timeout=15):
     try:
         out = subprocess.run(cmd, shell=True, capture_output=True, text=True,
@@ -116,6 +130,7 @@ def main():
     fakec2 = load(f"{BASE}/evidence/fakec2.jsonl")
     cowrie = load(f"{BASE}/cowrie/log/cowrie.json")
     creds = load(f"{BASE}/evidence/cred_scores.jsonl")
+    sessions = load(f"{BASE}/evidence/sessions.jsonl")
 
     all_rows = capture + fakec2 + cowrie
     stamps = [when(r) for r in all_rows if when(r)]
@@ -147,6 +162,12 @@ def main():
                 and r.get("eventid") == "cowrie.command.input"]
     new_cred = [r for r in creds
                 if (r.get("ts") or "") > since and not ours(r.get("ip"))]
+
+    # Behavioural sessions (ip+ua groups scored 0-100 by sessionize.py). Keyed on
+    # `last`, not `first`: the file is rewritten every hour, so an ongoing session
+    # is visible while it happens — the watcher dedupes by (ip, first).
+    agentic = [r for r in sessions
+               if (r.get("last") or "") > since and not ours(r.get("ip"))]
 
     now = datetime.datetime.utcnow()
 
@@ -188,6 +209,18 @@ def main():
                          "event": r.get("event"), "ua": (r.get("ua") or "")[:130]}
                         for r in crawlers],
         "scored_creds": new_cred,
+        "agentic_sessions": [{"ip": r.get("ip"), "score": r.get("agentic_score"),
+                              "events": r.get("events"), "first": r.get("first"),
+                              "last": r.get("last"),
+                              "gap_median": r.get("gap_median_s"),
+                              "distinct_paths": r.get("distinct_paths"),
+                              "paths": (r.get("path_order") or [])[:10],
+                              "kinds": r.get("event_kinds"),
+                              "ua": (r.get("ua") or "")[:90]} for r in agentic],
+        "pipeline_mtime": {
+            "sessions": mtime(f"{BASE}/evidence/sessions.jsonl"),
+            "creds": mtime(f"{BASE}/evidence/cred_scores.jsonl"),
+            "ja3": mtime(f"{BASE}/evidence/ja3.jsonl")},
         "attackers": sorted(attackers),
         "containers": containers(),
         "cert_days_left": cert_days_left(),

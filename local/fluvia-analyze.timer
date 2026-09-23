@@ -1,0 +1,11 @@
+[Unit]
+Description=Hourly Fluvia classification refresh
+
+[Timer]
+OnCalendar=hourly
+RandomizedDelaySec=180
+Persistent=true
+Unit=fluvia-analyze.service
+
+[Install]
+WantedBy=timers.target

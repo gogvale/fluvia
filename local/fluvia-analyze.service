@@ -1,0 +1,12 @@
+[Unit]
+Description=Fluvia honeypot classification refresh (creds, session scores, JA3)
+Documentation=file:/root/fluvia-deploy/scripts/analyze-cron.sh
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/root/fluvia-deploy/scripts/analyze-cron.sh
+Nice=19
+IOSchedulingClass=idle
+CPUQuota=60%
+TimeoutStartSec=600
