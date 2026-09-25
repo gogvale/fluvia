@@ -125,6 +125,13 @@ def cert_days_left():
 
 def main():
     since = sys.argv[1] if len(sys.argv) > 1 else "1970-01-01T00:00:00Z"
+    # Watchlist: comma-separated source IPs the operator has decided must not be
+    # forgotten (e.g. an unknown actor that read the honeytoken). Every fresh row
+    # from those IPs — web, sinkhole, SSH, scored creds — is returned verbatim,
+    # because the normal lanes only surface value-surface/agent/crawler paths and
+    # a plain browse by a watched IP would otherwise vanish.
+    watch = {x.strip() for x in (sys.argv[2] if len(sys.argv) > 2 else "").split(",")
+             if x.strip()}
 
     capture = load(f"{BASE}/evidence/capture.jsonl")
     fakec2 = load(f"{BASE}/evidence/fakec2.jsonl")
@@ -186,6 +193,31 @@ def main():
     attackers |= set(r.get("ip") for r in agent + crypto + crawlers + logins + new_cred)
     attackers.discard(None)
 
+    watch_hits = []
+    if watch:
+        for r in capture:
+            if r.get("ip") in watch and fresh(r):
+                watch_hits.append({"ts": when(r), "ip": r.get("ip"), "lane": "web",
+                                   "method": r.get("method"), "path": r.get("path"),
+                                   "event": r.get("event"),
+                                   "ua": (r.get("ua") or "")[:70]})
+        for r in fakec2:
+            if r.get("src_ip") in watch and fresh(r):
+                watch_hits.append({"ts": when(r), "ip": r.get("src_ip"), "lane": "sinkhole",
+                                   "path": f":{r.get('sink_port')}",
+                                   "preview": (r.get("preview") or "")[:100]})
+        for r in cowrie:
+            if r.get("src_ip") in watch and fresh(r):
+                watch_hits.append({"ts": when(r), "ip": r.get("src_ip"), "lane": "ssh",
+                                   "event": r.get("eventid"),
+                                   "path": r.get("input") or r.get("username") or ""})
+        for r in creds:
+            if r.get("ip") in watch and (r.get("ts") or "") > since:
+                watch_hits.append({"ts": r.get("ts"), "ip": r.get("ip"), "lane": "creds",
+                                   "event": r.get("class") or r.get("kind") or "scored",
+                                   "path": r.get("user") or ""})
+        watch_hits.sort(key=lambda r: r.get("ts") or "")
+
     print(json.dumps({
         "since": since,
         "newest": newest,
@@ -222,6 +254,7 @@ def main():
             "creds": mtime(f"{BASE}/evidence/cred_scores.jsonl"),
             "ja3": mtime(f"{BASE}/evidence/ja3.jsonl")},
         "attackers": sorted(attackers),
+        "watch_hits": watch_hits,
         "containers": containers(),
         "cert_days_left": cert_days_left(),
         "counts": {"capture": len(capture), "fakec2": len(fakec2),
