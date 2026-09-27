@@ -63,6 +63,7 @@ REMOTE = "/root/fluvia-deploy/scripts/watch-summary.py"
 STATE_DIR = os.environ.get("FLUVIA_STATE_DIR") or os.path.join(
     HOME, ".hermes/state/fluvia-watch")
 STATE_FILE = os.path.join(STATE_DIR, "state.json")
+WATCH_FILE = os.path.join(STATE_DIR, "watchlist.json")
 EPOCH = "1970-01-01T00:00:00Z"
 
 CERT_WARN_DAYS = 15
@@ -84,9 +85,16 @@ POKE_ATTEMPTS = 5            # <= this many tries = someone poking, not a campai
 AI_USERS = {"claude", "claudeai", "anthropic", "openai", "gpt", "gpt4", "chatgpt",
             "bot", "ai", "aiuser", "agent", "aiagent", "assistant", "copilot",
             "codex", "llm", "ollama", "langchain", "autogpt", "agentgpt",
-            "n8n", "flowise", "langflow", "dify", "crewai", "devin"}
+            "n8n", "flowise", "langflow", "dify", "crewai", "devin",
+            # Added 2026-09-27: measured in run 2 (vault Fluvia-Honeypot.md). These four
+            # were landing in the credentials 15-16 sep and the list did not cover them,
+            # so a *chosen* variant (`openclaw_7`) would never have fired. The bare names
+            # stay commodity: for a campaign IP distinctive_name() still silences them
+            # into suppressed.ai_name_in_wordlist.
+            "openclaw", "clawdbot", "cursor", "hummingbot"}
 AI_USER_PREFIX = ("claude", "openai", "anthropic", "chatgpt", "gpt-", "llm-",
-                  "ai-", "agent-", "ai_", "agent_")
+                  "ai-", "agent-", "ai_", "agent_",
+                  "openclaw", "clawdbot", "cursor", "hummingbot")
 AI_USER_RE = re.compile(r"^(sol|solana|solv|eth|ethereum|eth-?docker|node|nodejs|"
                         r"validator|raydium|tron|btc|bitcoin|xmr|monero|matic|"
                         r"polkadot|avax|usdc|usdt|stake|staking|wallet|metamask|"
@@ -132,10 +140,37 @@ def save_state(state):
     os.replace(tmp, STATE_FILE)
 
 
-def fetch(since):
+def load_watchlist():
+    """IPs that must re-alert on every return visit, whatever they do.
+
+    Added 2026-09-25: `seen_ips` announces an IP exactly once, so an actor worth
+    following (e.g. an unknown automation that read the honeytoken end to end and
+    is not Gabriel) would go permanently silent after its first run. This file
+    overrides that dedupe: any fresh row from a listed IP — web, sinkhole, SSH,
+    scored creds — is reported with what it touched.
+
+      203.0.113.148 203.0.113.2  UA-rotating API walker that read the honeytoken.
+
+    Shape: [{"ip": "x.x.x.x", "why": "why we care"}]
+    """
+    try:
+        with open(WATCH_FILE) as fh:
+            raw = json.load(fh)
+    except Exception:
+        return {}
+    out = {}
+    for item in raw if isinstance(raw, list) else []:
+        if isinstance(item, str):
+            out[item] = ""
+        elif isinstance(item, dict) and item.get("ip"):
+            out[item["ip"]] = item.get("why") or ""
+    return out
+
+
+def fetch(since, watch=()):
     cmd = [SSH, "-i", KEY, "-p", PORT, "-o", "BatchMode=yes",
            "-o", "ConnectTimeout=12", "-o", "ServerAliveInterval=5",
-           BOX, f"python3 {REMOTE} '{since}'"]
+           BOX, f"python3 {REMOTE} '{since}' '{','.join(sorted(watch))}'"]
     try:
         res = subprocess.run(cmd, capture_output=True, text=True, timeout=150)
     except subprocess.TimeoutExpired:
@@ -172,7 +207,8 @@ def main():
     state = load_state()
     first_run = not state
     since = state.get("watermark", EPOCH)
-    data, err = fetch(since)
+    watch = load_watchlist()
+    data, err = fetch(since, watch)
 
     now = datetime.now(timezone.utc)
     if data is None:
@@ -341,6 +377,33 @@ def main():
     if len(agentic_new) > CAP_AGENTIC:
         alerts.append(f"   …y {len(agentic_new) - CAP_AGENTIC} sesión(es) agéntica(s) más")
     state["seen_sessions"] = sorted(seen_sessions)[-3000:]
+
+    # --- watchlist: actors we chose to follow, never silenced by seen_ips --
+    # (same idea as the honeytoken: the interesting thing is the *return*, and the
+    # one-line-per-IP dedupe would swallow it.)
+    hits = [row for row in (data.get("watch_hits") or [])
+            if row.get("ip") in watch]
+    if hits:
+        per: dict = {}
+        for row in hits:
+            per.setdefault(row["ip"], []).append(row)
+        for ip, rows in sorted(per.items(), key=lambda kv: kv[1][0].get("ts") or ""):
+            seen_what, lanes = [], []
+            for row in rows:
+                tag = row.get("path") or row.get("event") or "?"
+                if tag and tag not in seen_what:
+                    seen_what.append(tag)
+                if row.get("lane") and row["lane"] not in lanes:
+                    lanes.append(row["lane"])
+            desc = f"🐟 VIGILADO {ip} volvió a actuar: {len(rows)} evento(s)"
+            if lanes:
+                desc += f" [{', '.join(lanes)}]"
+            alerts.append(desc)
+            shown = ", ".join(seen_what[:6])
+            if len(seen_what) > 6:
+                shown += f" +{len(seen_what) - 6}"
+            alerts.append(f"     {shown or '(sin detalle)'}"
+                          + (f" — {watch[ip]}" if watch.get(ip) else ""))
 
     # --- health (operational: a dead lure catches nothing) ----------------
     missing = data.get("containers", {}).get("missing", [])
