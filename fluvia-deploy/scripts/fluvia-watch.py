@@ -21,7 +21,8 @@ short alert ONLY when a **human or AI/agent actually interacted with the lure**:
             like an agent rather than a scanner      -> 🧠
         health (no access, container down, TLS
             expiry, evidence reset, classification
-            pipeline frozen)                          -> ⚠️
+            pipeline frozen, crawler ranges absent
+            or stale)                                 -> ⚠️
 
     SELECTIVE: a *first-ever-seen* IP gets one line, but only if it looks like a
         person or a targeted actor rather than a dictionary:
@@ -79,6 +80,8 @@ CAP_LOGIN, CAP_CMD, CAP_AGENT, CAP_CRYPTO, CAP_CRAWLER = 6, 6, 4, 4, 4
 AGENTIC_MIN = 30
 CAP_AGENTIC = 4
 PIPELINE_STALE_H = 6          # hourly fluvia-analyze timer; 6 h late = something broke
+RANGES_STALE_DAYS = 45        # state/crawler_ranges.json; the verified-crawler filter
+                              # is only as good as this file, so its age is a health item
 
 # --- what counts as "interesting" for a first-ever-seen IP --------------------
 POKE_ATTEMPTS = 5            # <= this many tries = someone poking, not a campaign
@@ -351,8 +354,20 @@ def main():
     # the honeypot's actual question, so it is worth a line when it fires.
     seen_sessions = set(state.get("seen_sessions", []))
     agentic_new = []
+
+    # Verified crawlers, counted and never sent (added 2026-09-27). sessionize.py
+    # masks them at the source and watch-summary.py already keeps them out of
+    # `agentic_sessions`; this loop is the second belt, so an older summary on the
+    # box cannot resurrect the false positive (2026-09-27: Googlebot smartphone
+    # session scored exactly 30 from /, /how-it-works, /terms over 34 h).
+    for row in data.get("verified_bot_sessions") or []:
+        suppressed["verified_bot_sessions"] = suppressed.get("verified_bot_sessions", 0) + 1
+
     for row in data.get("agentic_sessions", []):
         score = row.get("score") or 0
+        if row.get("verified_bot") or row.get("bot"):
+            suppressed["verified_bot_sessions"] = suppressed.get("verified_bot_sessions", 0) + 1
+            continue
         if score < AGENTIC_MIN:
             suppressed["agentic_below_min"] = suppressed.get("agentic_below_min", 0) + 1
             continue
@@ -440,6 +455,22 @@ def main():
                       f"(revisar fluvia-analyze.timer en la caja)")
         state["pipeline_stale_warned"] = now.date().isoformat()
 
+    # the verified-crawler exclusion is only as good as its ranges file: absent or
+    # stale silently restores the old false positive (a polite crawler scoring as an
+    # agent), so say so once a day instead of degrading quietly.
+    cr = data.get("crawler_ranges") or {}
+    age = cr.get("age_days")
+    if (not cr.get("present")) or (age is None) or (age > RANGES_STALE_DAYS):
+        if state.get("ranges_warned") != now.date().isoformat():
+            why = ("ausente" if not cr.get("present")
+                   else f"de {age} días" if age is not None else "sin fecha")
+            alerts.append(f"⚠️ Rangos de crawlers {why}: la verificación de bots está "
+                          f"desactivada o desactualizada "
+                          f"(refrescar: ~/.hermes/scripts/fluvia-crawler-ranges.py)")
+            state["ranges_warned"] = now.date().isoformat()
+    else:
+        state.pop("ranges_warned", None)
+
     # --- one line of context: how much noise was withheld this run --------
     if alerts:
         ips = len(per_ip)
@@ -450,6 +481,8 @@ def main():
             noise += f", {len(c2)} toques al sinkhole"
         if w1h:
             noise += f", {w1h} conexiones SSH en 1 h"
+        if suppressed.get("verified_bot_sessions"):
+            noise += f", {suppressed['verified_bot_sessions']} sesión(es) de crawler verificado"
         alerts.append(noise)
 
     state["watermark"] = max(newest, state.get("watermark", EPOCH))

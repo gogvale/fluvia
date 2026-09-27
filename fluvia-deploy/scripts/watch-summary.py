@@ -13,10 +13,13 @@ Significant = C2 sinkhole hits, SSH credential attempts / commands, AI-agent
 lure touches (/llms.txt, /agent-notes, /archive, /api/v1/agent-ack), any AI
 crawler touching the lure (near miss: robots.txt / sitemap.xml), crypto-value
 probes, and behaviourally-scored web sessions (`agentic_sessions`, from
-sessionize.py: how a session moved, not how much). Commodity web scanning noise
-is deliberately NOT reported (it is still counted, in `counts`). Also reports
-`pipeline_mtime`, the freshness of the derived artifacts, so a
-silently-frozen classifier pipeline cannot pass as a quiet lure.
+sessionize.py: how a session moved, not how much). Verified crawlers — a session
+whose (ip, ua) matches an operator's published crawl range — are returned
+separately in `verified_bot_sessions` and are never part of a lane (added
+2026-09-27). Commodity web scanning noise is deliberately NOT reported (it is
+still counted, in `counts`). Also reports `pipeline_mtime`, the freshness of the
+derived artifacts, so a silently-frozen classifier pipeline cannot pass as a quiet
+lure, and `crawler_ranges`, the freshness of the ranges that drive that check.
 """
 import collections
 import datetime
@@ -24,6 +27,14 @@ import json
 import os
 import subprocess
 import sys
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+if HERE not in sys.path:
+    sys.path.insert(0, HERE)
+try:                       # optional: never break the summary over this
+    import crawler_verify
+except Exception:          # noqa: BLE001
+    crawler_verify = None
 
 BASE = os.environ.get("FLUVIA_BASE", "/root/fluvia-deploy")
 
@@ -173,8 +184,15 @@ def main():
     # Behavioural sessions (ip+ua groups scored 0-100 by sessionize.py). Keyed on
     # `last`, not `first`: the file is rewritten every hour, so an ongoing session
     # is visible while it happens — the watcher dedupes by (ip, first).
-    agentic = [r for r in sessions
-               if (r.get("last") or "") > since and not ours(r.get("ip"))]
+    #
+    # Verified crawlers are lifted out here, not in the watcher: sessionize.py
+    # already writes them with agentic_score 0 + a `verified_bot` label, and a
+    # session that only got its points from reading three pages while its address
+    # belongs to Google/Bing/OpenAI is exactly the false positive this closes.
+    agentic_all = [r for r in sessions
+                   if (r.get("last") or "") > since and not ours(r.get("ip"))]
+    agentic = [r for r in agentic_all if not r.get("verified_bot")]
+    verified_bots = [r for r in agentic_all if r.get("verified_bot")]
 
     now = datetime.datetime.utcnow()
 
@@ -249,10 +267,19 @@ def main():
                               "paths": (r.get("path_order") or [])[:10],
                               "kinds": r.get("event_kinds"),
                               "ua": (r.get("ua") or "")[:90]} for r in agentic],
+        "verified_bot_sessions": [{"ip": r.get("ip"), "bot": r.get("verified_bot"),
+                                   "behaviour_score": r.get("behaviour_score"),
+                                   "events": r.get("events"), "first": r.get("first"),
+                                   "last": r.get("last"),
+                                   "paths": (r.get("path_order") or [])[:10],
+                                   "ua": (r.get("ua") or "")[:90]}
+                                  for r in verified_bots],
         "pipeline_mtime": {
             "sessions": mtime(f"{BASE}/evidence/sessions.jsonl"),
             "creds": mtime(f"{BASE}/evidence/cred_scores.jsonl"),
             "ja3": mtime(f"{BASE}/evidence/ja3.jsonl")},
+        "crawler_ranges": (crawler_verify.info() if crawler_verify else
+                           {"present": False, "error": "crawler_verify unavailable"}),
         "attackers": sorted(attackers),
         "watch_hits": watch_hits,
         "containers": containers(),

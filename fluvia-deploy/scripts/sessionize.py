@@ -9,6 +9,14 @@ from an agent that actually read the pages.
     python3 scripts/sessionize.py [--top N]
 
 Outputs evidence/sessions.jsonl (sorted by agentic_score) and prints a summary.
+
+Verified crawlers (added 2026-09-27): a UA is a claim, an IP inside the operator's
+published range is the identity. Rows whose (ip, ua) verifies via crawler_verify.py
+keep their behavioural number in `behaviour_score` but are written with
+`agentic_score: 0` plus a `verified_bot` label, so the watcher's 🧠 lane stops
+firing on commodity Google/Bing/OpenAI crawlers that happen to walk three pages
+(a Googlebot session scored exactly AGENTIC_MIN = 30 that way). A spoofed crawler
+UA from anywhere else has no matching range and still scores.
 """
 import json
 import os
@@ -20,6 +28,12 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 CAPTURE = os.path.join(ROOT, "evidence", "capture.jsonl")
 OUT = os.path.join(ROOT, "evidence", "sessions.jsonl")
+
+sys.path.insert(0, HERE)
+try:                       # optional: a missing/broken module must not stop the scorer
+    import crawler_verify
+except Exception:          # noqa: BLE001
+    crawler_verify = None
 
 SIGNALS = {
     "ai_canary_fetch": 20,   # fetched /llms.txt or the runbook
@@ -66,6 +80,8 @@ def main() -> int:
             sessions[(rec.get("ip") or "?", ua)].append(rec)
 
     rows = []
+    masked = 0
+    bots = {}
     for (ip, ua), events in sessions.items():
         events.sort(key=lambda r: r.get("ts") or "")
         stamps = [t for t in (parse_ts(r.get("ts", "")) for r in events) if t]
@@ -85,22 +101,39 @@ def main() -> int:
             score -= 20  # sub-50ms cadence = a loop, not a reader
         score = max(0, min(100, score))
 
-        rows.append(
-            {
-                "ip": ip,
-                "ua": ua,
-                "events": len(events),
-                "first": events[0].get("ts"),
-                "last": events[-1].get("ts"),
-                "gap_median_s": med,
-                "gap_p95_s": round(statistics.quantiles(gaps, n=20)[18], 3) if len(gaps) >= 20 else (max(gaps) if gaps else None),
-                "gap_max_s": max(gaps) if gaps else None,
-                "distinct_paths": len(set(paths)),
-                "path_order": paths[:25],
-                "event_kinds": dict(kinds),
-                "agentic_score": score,
-            }
-        )
+        # Verified crawler? Keep the behavioural number for the record, but do not
+        # hand it to the agentic lane: a polite crawler walking three pages is not
+        # an agent. Unverified claims (spoofed UA, operator with no published
+        # ranges, missing ranges file) fall through and score as before.
+        # UA is truncated to 80 chars for the (ip, ua) key and for display. Verify
+        # against the LONGEST UA in the group instead: the Googlebot smartphone UA is
+        # 199 chars and its marker ("Googlebot/2.1") sits at ~160, so checking the
+        # truncated string silently un-verifies exactly the sessions this filter is
+        # for (found live 2026-09-27: the masked row came back agentic_score 30).
+        ua_full = max(((r.get("ua") or "") for r in events), key=len, default=ua)
+        bot = crawler_verify.verify(ip, ua_full) if crawler_verify else ""
+        if bot:
+            masked += 1
+            bots[bot] = bots.get(bot, 0) + 1
+
+        row = {
+            "ip": ip,
+            "ua": ua,
+            "events": len(events),
+            "first": events[0].get("ts"),
+            "last": events[-1].get("ts"),
+            "gap_median_s": med,
+            "gap_p95_s": round(statistics.quantiles(gaps, n=20)[18], 3) if len(gaps) >= 20 else (max(gaps) if gaps else None),
+            "gap_max_s": max(gaps) if gaps else None,
+            "distinct_paths": len(set(paths)),
+            "path_order": paths[:25],
+            "event_kinds": dict(kinds),
+            "behaviour_score": score,
+            "agentic_score": 0 if bot else score,
+        }
+        if bot:
+            row["verified_bot"] = bot
+        rows.append(row)
 
     rows.sort(key=lambda r: (r["agentic_score"], r["events"]), reverse=True)
     os.makedirs(os.path.dirname(OUT), exist_ok=True)
@@ -109,6 +142,13 @@ def main() -> int:
             fh.write(json.dumps(row, ensure_ascii=False) + "\n")
 
     print(f"[sessions] {len(rows)} session(s) -> {OUT}")
+    if masked:
+        detail = ", ".join(f"{k} x{v}" for k, v in sorted(bots.items()))
+        print(f"[sessions] {masked} verified-crawler session(s) masked out of the agentic lane "
+              f"({detail})")
+    elif crawler_verify is None:
+        print("[sessions] crawler_verify unavailable: no session was checked against "
+              "published crawler ranges")
     for row in rows[:top_n]:
         print(
             f"  score={row['agentic_score']:3d} n={row['events']:4d} "
