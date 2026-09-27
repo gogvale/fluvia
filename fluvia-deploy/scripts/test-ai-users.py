@@ -1,14 +1,27 @@
 #!/usr/bin/env python3
-"""Harness for the AI-era username lane in fluvia-watch.py (2026-09-27 change).
+"""Harness for the AI-era username lane in fluvia-watch.py (change of 2026-09-27).
 
-Run: python3 /tmp/test-ai-users.py
+Verifies the 2026-09-27 addition (`openclaw`, `clawdbot`, `cursor`, `hummingbot`
+to AI_USERS / AI_USER_PREFIX) and, just as important, that the older names and
+the crypto lane do not regress.
+
+Run: python3 test-ai-users.py
+Exit code 0 = all cases green.
 """
 import importlib.util
 import os
 import sys
 
-spec = importlib.util.spec_from_file_location(
-    "fw", "os.path.join(os.path.dirname(os.path.abspath(__file__)), "fluvia-watch.py")")
+_here = os.path.dirname(os.path.abspath(__file__))
+CANDIDATES = [
+    os.path.join(_here, "fluvia-watch.py"),                      # inside the repo
+    os.path.expanduser("~/.hermes/scripts/fluvia-watch.py"),     # as deployed
+]
+TARGET = next((p for p in CANDIDATES if os.path.exists(p)), None)
+if not TARGET:
+    sys.exit("fluvia-watch.py not found next to this harness nor in ~/.hermes/scripts")
+
+spec = importlib.util.spec_from_file_location("fw", TARGET)
 fw = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(fw)
 
@@ -27,6 +40,7 @@ def check(label, got, want):
         print(f"  FAIL  {label:28} -> {got!r} (want {want!r})")
 
 
+print(f"target: {TARGET}\n")
 print("interesting_user() — new names")
 check("openclaw", fw.interesting_user("openclaw"), AI)
 check("openclaw_7", fw.interesting_user("openclaw_7"), AI)
@@ -65,7 +79,7 @@ print("campaign branch (>5 attempts) — bare name silenced, chosen name survive
 
 
 def campaign_line(user):
-    """Mirror of the branch in main(): returns the suffix the line would carry."""
+    """Mirror of the branch in main(): the suffix the line would carry."""
     why = fw.interesting_user(user)
     if why and not fw.distinctive_name(user):
         return ""            # -> suppressed.ai_name_in_wordlist
